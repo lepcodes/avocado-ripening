@@ -1,10 +1,10 @@
-# avocado-ripening
+# avocado-ripening  🥑
 
 <a target="_blank" href="https://cookiecutter-data-science.drivendata.org/">
     <img src="https://img.shields.io/badge/CCDS-Project%20template-328F97?logo=cookiecutter" />
 </a>
 
-A short description of the project.
+A Deep Learning project for predicting the ripening of avocado images.
 
 ## Project Organization
 
@@ -39,7 +39,7 @@ A short description of the project.
 │
 ├── setup.cfg          <- Configuration file for flake8
 │
-└── avocado_ripening   <- Source code for use in this project.
+└── src                <- Source code for use in this project.
     │
     ├── __init__.py             <- Makes avocado_ripening a Python module
     │
