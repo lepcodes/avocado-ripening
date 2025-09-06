@@ -6,6 +6,37 @@
 
 A Deep Learning project for predicting the ripening of avocado images.
 
+## Building the Docker Image
+
+To build the Docker image for development, run the following command:
+
+```bash
+docker build -t avocado-ripening-api .
+```
+
+and then run the container with the following command:
+
+```bash
+docker-compose up
+```
+
+To build the Docker image for production, run the following command:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t lepcodes/avocado-ripening-api:latest --push .
+```
+
+
+## Running the Docker Container
+
+To run the Docker container, use the following command:
+
+```bash
+docker run -p 8080:80 avocado-ripening
+```
+
+This will start the container and map port 80 of the container to port 8080 of the host machine.
+
 ## Project Organization
 
 ```
