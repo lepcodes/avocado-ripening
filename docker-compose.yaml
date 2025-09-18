@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   api:
     container_name: avocado-api
@@ -15,4 +13,22 @@ services:
       - MODEL_DIR=/app/models
       - TF_ENABLE_ONEDNN_OPTS=0
       - TF_CPP_MIN_LOG_LEVEL=2
+    restart: unless-stopped
+  mlflow:
+    container_name: mlflow-server
+    build:
+      context: ./mlflow
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri file:///mlruns/backend
+      --default-artifact-root s3://ampere-instance-bucket/
+    ports:
+      - "5001:5000"
+    environment:
+      # These two variables are standard for S3 authentication
+      - AWS_ACCESS_KEY_ID=
+      - AWS_SECRET_ACCESS_KEY=
+      - MLFLOW_S3_ENDPOINT_URL=https://ax8xioref7rp.compat.objectstorage.mx-queretaro-1.oraclecloud.com
     restart: unless-stopped
