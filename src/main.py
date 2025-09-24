@@ -34,7 +34,9 @@ async def lifespan(app: FastAPI):
     print("Application startup: Loading model...")
 
     # The path inside the container where models are mounted
-    model_dir = "/app/models"
+    model_dir = os.getenv("MODEL_DIR")
+    if not model_dir:
+        raise ValueError("Environment variable 'MODEL_DIR' is not set.")
 
     model_name = os.getenv("MODEL_NAME")
 
