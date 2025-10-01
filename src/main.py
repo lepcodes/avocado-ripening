@@ -1,5 +1,7 @@
 from fastapi import FastAPI
-from fastapi import UploadFile, File, HTTPException
+from fastapi import UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from typing import Optional
 from contextlib import asynccontextmanager
 from tensorflow import keras
 from enum import Enum
@@ -7,6 +9,7 @@ from typing import List
 from pydantic import BaseModel
 from PIL import Image
 import numpy as np
+import requests
 import io
 import os
 
@@ -59,6 +62,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 mapping = {
     StorageCondition.T10: [1, 0, 0],
     StorageCondition.T20: [0, 1, 0],
@@ -84,12 +96,56 @@ async def root():
 
 @app.post("/predict")
 async def predict(
-    image_file: UploadFile = File(...), storage_condition: StorageCondition = StorageCondition.Tam
+    image_file: Optional[UploadFile] = File(None),
+    image_url: Optional[str] = Form(None),
+    image_name: Optional[str] = Form(None),
+    storage_condition: StorageCondition = StorageCondition.Tam,
 ):
-    """A dummy prediction endpoint that returns image size."""
+    """
+    Make a prediction of ripeness of an avocado based on its image and storage condition.
+    - image_file: Upload an image file directly. (Option 1)
+    - image_url: Provide a URL to an image. (Option 2)
+    - image_name: Provide the name of an image file in the 'images' directory. (Option 2)
+    - storage_condition: Specify the storage condition (T10, T20, Tam). Default is 'Tam'.
+    """
 
-    # Process the uploaded image file
-    image = await validate_image_pil(image_file)
+    # --- 1. Validation and Data Acquisition ---
+
+    if image_file and (image_url or image_name):
+        # Error if both methods are provided
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either 'image_file' OR ('image_url' and 'image_name'), not both.",
+        )
+
+    # --- 2. Image Loading and Processing ---
+
+    try:
+        if image_file:
+            print(f"Processing uploaded file: {image_file.filename}")
+            image = await validate_image_pil(image_file)
+
+        elif image_url and image_name:
+            print(f"Processing image from URL: {image_url}")
+            response = requests.get(image_url)
+            response.raise_for_status()
+            image_source = response.content
+            image = Image.open(io.BytesIO(image_source))
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Image data missing. Provide 'image_file' or both 'image_url' and 'image_name'.",
+            )
+    except HTTPException as e:
+        # Re-raise HTTP exceptions to send proper client errors
+        raise e
+    except Exception as e:
+        # Better logging for unexpected errors
+        print(f"An unexpected error occurred during image processing: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing image: {e}")
+
+    # --- 3. Image Transformation ---
     image = image.resize((224, 224))
     img_array = np.array(image)
     img_array = np.expand_dims(img_array, axis=0)
@@ -97,7 +153,7 @@ async def predict(
     # Process the storage condition
     storage_condition = np.array([mapping[storage_condition]])
 
-    # Make the prediction
+    # --- 4. Model Prediction ---
     x = {"image_input": img_array, "condition_input": storage_condition}
     try:
         y = models["model"].predict(x)
