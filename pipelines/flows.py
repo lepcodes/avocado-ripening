@@ -133,6 +133,7 @@ def preprocess_data(raw_data_path: str):
         "Shelf-life Days"  # 5th
     ]
     data = data.reindex(columns=target_columns, fill_value=0)
+    os.makedirs(processed_dir, exist_ok=True)
     data.to_csv(os.path.join(processed_dir, "data.csv"), index=False)
 
     # Preprocessing complete
