@@ -108,3 +108,4 @@ wrapt==1.17.3
 zipp==3.23.0
 prefect==3.6.2
 boto3==1.35.95
+kaggle==1.8.0
