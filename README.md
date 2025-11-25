@@ -46,7 +46,7 @@ services:
 To build the Docker image for production, run the following command (you need to replace lepcodes with your Docker Hub username):
 
 ```bash
-docker buildx build --platform linux/amd64,linux/arm64 -t lepcodes/avocado-ripening-api:latest --push .
+docker buildx build --platform linux/amd64,linux/arm64 -t lepcodes/avocado-base:latest --push .
 ```
 
 # MLFlow Server

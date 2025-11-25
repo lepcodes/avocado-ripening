@@ -1,0 +1,31 @@
+# prefect.yaml
+name: avocado-project
+prefect-version: 3.6.2
+
+build: null
+push: null
+
+pull:
+  - prefect.deployments.steps.git_clone:
+      repository: https://github.com/lepcodes/avocado-ripening.git
+      branch: feature/pipelines
+
+deployments:
+  - name: "nightly-training"
+    description: "Retrains the avocado model using new data."
+    version: "{{ git_commit_sha }}"
+    tags: ["prod", "training"]
+    entrypoint: "pipelines/flows.py:test_flow" 
+    work_pool:
+      name: "oci-docker-pool"
+      job_variables:
+        image: "lepcodes/avocado-base:latest"
+        image_pull_policy: "Always"
+        networks: ["avocado-network"]
+        env:
+          MLFLOW_TRACKING_URI: "http://mlflow:5000"
+          PREFECT_API_URL: "http://prefect-server:4200/api"
+          PREFECT_LOGGING_LEVEL: "DEBUG"
+          AWS_ACCESS_KEY_ID: "{{ $AWS_ACCESS_KEY_ID }}"
+          AWS_SECRET_ACCESS_KEY: "{{ $AWS_SECRET_ACCESS_KEY }}"
+          OCI_ENDPOINT_URL: "{{ $OCI_ENDPOINT_URL }}"
