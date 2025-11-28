@@ -1,15 +1,20 @@
 import json
 import os
 import shutil
+import time
 import zipfile
-
+import mlflow
 import boto3
 import numpy as np
 import pandas as pd
+import nbformat as nbf
 from botocore.client import Config
 from dotenv import load_dotenv
 from prefect import flow, task
 from prefect.logging import get_run_logger
+from prefect.states import Failed
+from prefect.context import get_run_context
+from mlflow.tracking import MlflowClient
 
 load_dotenv()
 from kaggle.api.kaggle_api_extended import KaggleApi
@@ -231,16 +236,162 @@ def upload_preprocessed_data(processed_dir, raw_dir):
 
 
 @task
-def train_model(data, dataset_path):
-    data.to_csv(dataset_path + "/data.csv", index=False)
-    return data
+def train_model( 
+    run_id: str,
+    model_name: str,
+    experiment_name: str,
+    run_name: str,
+):
+    logger = get_run_logger()
+    KAGGLE_USERNAME = "luispreciado99"
+    PROJECT_SLUG = "avocado-ripening-notebook"
+    DATASET_SLUG = "avocado-ripening-dataset"
+    NOTEBOOK_PATH = "notebooks/training-notebook-template.ipynb"
+
+    logger.info("Authenticating with Kaggle API...")
+    api = KaggleApi()
+    api.authenticate()
+
+    logger.info("Creating metadata for kernel...")
+    notebook_abs_path = os.path.abspath(NOTEBOOK_PATH)
+    notebook_parent_dir = os.path.dirname(notebook_abs_path)
+    notebook_staged_path = os.path.join(notebook_parent_dir, "training-notebook-staged.ipynb")
+    kernel_id = f"{KAGGLE_USERNAME}/{PROJECT_SLUG}"
+    dataset_id = f"{KAGGLE_USERNAME}/{DATASET_SLUG}"
+    if not os.path.exists(notebook_abs_path):
+        raise FileNotFoundError(f"Could not find notebook at: {notebook_abs_path}")
+    metadata = {
+        "id": kernel_id,
+        "title": PROJECT_SLUG,
+        "code_file": os.path.basename(notebook_staged_path),
+        "language": "python",
+        "kernel_type": "notebook",
+        "is_private": "true",
+        "enable_gpu": "false",
+        "enable_internet": "true",
+        "dataset_sources": [], # [dataset_id],
+        "kernel_sources": [],
+        "competition_sources": []
+    }
+    with open(os.path.join(notebook_parent_dir, "kernel-metadata.json"), "w") as f:
+        json.dump(metadata, f, indent=4)
+
+    logger.info("Injecting code cells...")
+    notebook = nbf.read(notebook_abs_path, as_version=4)
+    if notebook.nbformat_minor < 5:
+        notebook.nbformat_minor = 5
+    parameters = f"""
+# ------ HYPERPARAMETERS ------
+BATCH_SIZE = 12
+EPOCHS = 10
+LEARNING_RATE = 0.001
+
+# ------ PREFECT_RUN_ID ------
+PREFECT_RUN_ID = "{run_id}"
+EXPERIMENT_NAME = "{experiment_name}"
+RUN_NAME = "{run_name}"
+"""
+    new = nbf.v4.new_code_cell(parameters)
+    notebook.cells.insert(2, new)
+    if notebook.nbformat_minor < 5:
+        notebook.nbformat_minor = 5
+    nbf.write(notebook, notebook_staged_path)
+
+    logger.info("Pushing kernel...")
+    try:
+        api.kernels_push(notebook_parent_dir)
+        logger.info("✅ Kernel pushed successfully.")
+        os.remove(notebook_staged_path)
+    except Exception as e:
+        logger.error(f"❌ Error pushing kernel: {e}")
+        raise e
+
+    logger.info("Polling status loop...")
+    while True:
+        try:
+            response = api.kernels_status(kernel_id)
+            raw_status = str(response.status)
+            status_clean = raw_status.split('.')[-1].lower()
+            logger.info(f"Status: {status_clean.upper()} (Raw: {raw_status}) | Time: {time.strftime('%H:%M:%S')}")
+
+            if status_clean == 'complete':
+                logger.info("✅ Kernel finished successfully!")
+                break
+            
+            elif status_clean == 'error':
+                failure_msg = str(response.failureMessage)
+                raise Exception(f"Kaggle Training Failed: {failure_msg} | Time: {time.strftime('%H:%M:%S')}")
+
+            elif status_clean in ['queued', 'running', 'starting', 'canceling']:
+                time.sleep(10)
+            
+            else:
+                logger.warning(f"⚠️ Unknown state {status_clean}. Keep waiting...")
+                time.sleep(20)
+
+        except Exception as e:
+            logger.error(f"❌ Error checking status: {e}")
+            raise Failed(message=f"Error checking status: {e}")
+    return run_id
 
 
 @task
-def evaluate_model(data):
-    print("Evaluating model")
-    return data
+def evaluate_model(
+    run_id: str,
+    model_name: str,
+    experiment_name: str,
+):
+    logger = get_run_logger()
+    client = MlflowClient("https://mlflow.lepcodes.com")
+    
+    # Search Experiment
+    experiment = client.get_experiment_by_name(experiment_name)
+    if not experiment:
+        raise ValueError(f"Experiment '{experiment_name}' not found!")
+    
+    # Get Challenger Run
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        filter_string=f"tags.prefect_run_id = '{run_id}'"
+    )
+    challenger_run = runs[0]
+    challenger_metric = challenger_run.data.metrics.get('accuracy_test', 0)
+    challenger_run_id = challenger_run.info.run_id
+    logger.info(f"Challenger found: {challenger_metric}")
 
+    # Get Current Champion 
+    try:
+        logger.info("Getting Champion...")
+        champion_info = client.get_model_version_by_alias(model_name, "champion")
+        champion_run = client.get_run(champion_info.run_id)
+        champion_metric = champion_run.data.metrics.get('accuracy_test', 0)
+        logger.info(f"Champion found: {champion_metric}")
+    except Exception as e:
+        logger.info(f"No Champion found: {e}")
+        champion_metric = 0
+
+    # Update Champion
+    if challenger_metric > champion_metric:
+        # Register Champion to Model Registry
+        logger.info("Promotion! Updating Champion...")
+        try:
+            client.create_registered_model(model_name)
+        except Exception as e:
+            logger.info(f"Champion already registered: {e}")
+
+        try:
+            challenger_version = client.create_model_version(
+                name=model_name,
+                source=f"runs:/{challenger_run_id}/{model_name}",
+                run_id=challenger_run_id
+            )
+            client.set_registered_model_alias(model_name, "champion", challenger_version.version)
+            logger.info(f"Champion registered: {challenger_version.version}")
+        except Exception as e:
+            logger.info(f"Error registering Champion: {e}")
+    else:
+        logger.info("No Promotion. Keeping Champion...")
+    return
 
 @task
 def deploy_model(data):
@@ -249,18 +400,37 @@ def deploy_model(data):
 
 
 @flow
-def test_flow():
+def test_flow(
+    run_name: str,
+    model_name: str = "avocado-model",
+    experiment_name: str = "Avocado Ripening Experiment",
+):
     logger = get_run_logger()
 
-    raw_data_path = fetch_data()
-    logger.info(f"Dataset path: {raw_data_path}")
+    # # raw_data_path = fetch_data()
 
-    preprocessed_data_path = preprocess_data(raw_data_path)
-    logger.info(f"Preprocessed data path: {preprocessed_data_path}")
+    # # preprocessed_data_path = preprocess_data(raw_data_path)
 
-    upload_preprocessed_data(preprocessed_data_path, raw_data_path)
-    return raw_data_path
+    # # upload_preprocessed_data(preprocessed_data_path, raw_data_path)
+
+    # Get Run ID
+    prefect_run_id = get_run_context().flow_run.id
+    logger.info(f"Run ID: {prefect_run_id}")
+
+    train_model(
+        run_id=prefect_run_id,
+        model_name=model_name,
+        experiment_name=experiment_name,
+        run_name=run_name,
+    )
+
+    evaluate_model(
+        run_id=prefect_run_id, 
+        model_name=model_name,
+        experiment_name=experiment_name,
+    )
+    return
 
 
 if __name__ == "__main__":
-    test_flow()
+    test_flow.serve(name="my-first-deployment")
