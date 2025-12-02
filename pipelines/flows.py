@@ -3,7 +3,6 @@ import os
 import shutil
 import time
 import zipfile
-import mlflow
 import boto3
 import numpy as np
 import pandas as pd
