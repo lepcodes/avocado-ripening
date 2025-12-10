@@ -3,20 +3,70 @@ import os
 import shutil
 import time
 import zipfile
+from enum import Enum
+
 import boto3
+import nbformat as nbf
 import numpy as np
 import pandas as pd
-import nbformat as nbf
 from botocore.client import Config
 from dotenv import load_dotenv
-from prefect import flow, task
-from prefect.logging import get_run_logger
-from prefect.states import Failed
-from prefect.context import get_run_context
 from mlflow.tracking import MlflowClient
+from prefect import flow, task
+from prefect.context import get_run_context
+from prefect.logging import get_run_logger
+from pydantic import BaseModel
 
 load_dotenv()
 from kaggle.api.kaggle_api_extended import KaggleApi
+
+BATCH_SIZE = 12
+EPOCHS = 10
+LEARNING_RATE = 0.001
+FINETUNE_DEPTH = 100
+MAX_POLL_RETRIES = 10
+
+
+class OptimizerType(str, Enum):
+    ADAM = "adam"
+    SGD = "sgd"
+    RMSPROP = "rmsprop"
+
+
+class CNNType(str, Enum):
+    RESNET = "resnet50"
+    MOBILENETV2 = "mobilenetv2"
+
+
+class TrainingConfig(BaseModel):
+    batch_size: int = BATCH_SIZE
+    epochs: int = EPOCHS
+    learning_rate: float = LEARNING_RATE
+    optimizer_type: OptimizerType = OptimizerType.ADAM
+    cnn_type: CNNType = CNNType.RESNET
+    finetune_depth: int = FINETUNE_DEPTH
+
+
+from enum import Enum
+
+
+class KaggleKernelStatus(str, Enum):
+    # --- Pending / Active States ---
+    QUEUED = "queued"
+    RUNNING = "running"
+    STARTING = "starting"
+
+    # --- Cancellation States (The ones trapping you) ---
+    CANCELING = "canceling"
+    CANCEL_REQUESTED = "cancel_requested"
+    CANCEL_ACKNOWLEDGED = "cancel_acknowledged"
+
+    # --- Terminal States ---
+    COMPLETE = "complete"
+    ERROR = "error"
+
+    # --- Unknown/Fallback ---
+    UNKNOWN = "unknown"
 
 
 def compute_overripeness_time(time_stamp, overripe_time_stamp):
@@ -100,14 +150,27 @@ def preprocess_data(raw_data_path: str):
     # Preprocess the data
     logger.info("\tPreprocessing data...")
     overripe_days = data[data["Ripening Index Classification"] == 5]
-    first_overripe_day = overripe_days.groupby("Sample")[["Day of Experiment", "Time Stamp"]].min()
-    data["Overripening Day"] = data["Sample"].map(first_overripe_day["Day of Experiment"])
-    data["Overripening Time Stamp"] = data["Sample"].map(first_overripe_day["Time Stamp"])
-    data["Time Unitl Overripening"] = data[["Time Stamp", "Overripening Time Stamp"]].apply(
-        lambda x: compute_overripeness_time(x["Time Stamp"], x["Overripening Time Stamp"]), axis=1
+    first_overripe_day = overripe_days.groupby("Sample")[
+        ["Day of Experiment", "Time Stamp"]
+    ].min()
+    data["Overripening Day"] = data["Sample"].map(
+        first_overripe_day["Day of Experiment"]
+    )
+    data["Overripening Time Stamp"] = data["Sample"].map(
+        first_overripe_day["Time Stamp"]
+    )
+    data["Time Unitl Overripening"] = data[
+        ["Time Stamp", "Overripening Time Stamp"]
+    ].apply(
+        lambda x: compute_overripeness_time(
+            x["Time Stamp"], x["Overripening Time Stamp"]
+        ),
+        axis=1,
     )
     seconds_in_a_day = 24 * 60 * 60
-    data["Shelf-life Days"] = data["Time Unitl Overripening"].dt.total_seconds() / seconds_in_a_day
+    data["Shelf-life Days"] = (
+        data["Time Unitl Overripening"].dt.total_seconds() / seconds_in_a_day
+    )
     data = pd.concat([data, pd.get_dummies(data["Storage Group"], dtype=int)], axis=1)
     data.drop(
         [
@@ -126,20 +189,24 @@ def preprocess_data(raw_data_path: str):
         inplace=True,
     )
     data.dropna(inplace=True)
-    data["Absolute Path"] = data["File Name"].apply(lambda x: os.path.join(raw_data_path, "images", x + ".jpg"))
+    data["Absolute Path"] = data["File Name"].apply(
+        lambda x: os.path.join(raw_data_path, "images", x + ".jpg")
+    )
 
     mask_existing_images = data["Absolute Path"].apply(os.path.exists)
-    logger.info(f"\tUnexisting images: {data['Absolute Path'].count() - mask_existing_images.sum()}")
+    logger.info(
+        f"\tUnexisting images: {data['Absolute Path'].count() - mask_existing_images.sum()}"
+    )
     data = data[mask_existing_images].copy()
     data.drop(["Absolute Path"], axis=1, inplace=True)
     # Final column reordering
     logger.info("\tFinal column reordering...")
     target_columns = [
-        "File Name",       # 1st
-        "T10",             # 2nd
-        "T20",             # 3rd
-        "Tam",             # 4th
-        "Shelf-life Days"  # 5th
+        "File Name",  # 1st
+        "T10",  # 2nd
+        "T20",  # 3rd
+        "Tam",  # 4th
+        "Shelf-life Days",  # 5th
     ]
     data = data.reindex(columns=target_columns, fill_value=0)
     os.makedirs(processed_dir, exist_ok=True)
@@ -148,6 +215,7 @@ def preprocess_data(raw_data_path: str):
     # Preprocessing complete
     logger.info("\tPreprocessing complete.")
     return processed_dir
+
 
 @task
 def upload_preprocessed_data(processed_dir, raw_dir):
@@ -188,7 +256,7 @@ def upload_preprocessed_data(processed_dir, raw_dir):
     metadata = {
         "title": "Avocado Ripening Dataset",
         "id": dataset_id,
-        "licenses": [{"name": "CC0-1.0"}]
+        "licenses": [{"name": "CC0-1.0"}],
     }
     with open(os.path.join(staging_dir, "dataset-metadata.json"), "w") as f:
         json.dump(metadata, f, indent=4)
@@ -206,13 +274,10 @@ def upload_preprocessed_data(processed_dir, raw_dir):
     try:
         logger.info("Attempting to update dataset version...")
         api.dataset_create_version(
-            staging_dir, 
-            version_notes=message, 
-            dir_mode='zip',
-            quiet=False
+            staging_dir, version_notes=message, dir_mode="zip", quiet=False
         )
         logger.info("\t✅ New dataset version created successfully.")
-        
+
     except Exception as e:
         error_str = str(e).lower()
         if any(x in error_str for x in ["404", "not found", "403", "forbidden"]):
@@ -220,27 +285,25 @@ def upload_preprocessed_data(processed_dir, raw_dir):
             logger.info("\t🆕 Trying to create it from scratch...")
             try:
                 api.dataset_create_new(
-                    staging_dir, 
-                    dir_mode='zip', 
-                    public=False,
-                    quiet=False
+                    staging_dir, dir_mode="zip", public=False, quiet=False
                 )
                 logger.info("\t✅ Dataset created successfully.")
             except Exception as e2:
                 logger.error(f"❌ Fatal error trying to create: {e2}")
                 raise e2
-                
+
         else:
             logger.error(f"❌ Unexpected error not handled: {e}")
             raise e
 
 
 @task
-def train_model( 
+def train_model(
     run_id: str,
     model_name: str,
     experiment_name: str,
     run_name: str,
+    config: TrainingConfig,
 ):
     logger = get_run_logger()
     logger.info("📋 Beginning model training...")
@@ -256,11 +319,13 @@ def train_model(
     logger.info("\tCreating metadata for kernel...")
     notebook_abs_path = os.path.abspath(NOTEBOOK_PATH)
     notebook_parent_dir = os.path.dirname(notebook_abs_path)
-    notebook_staged_path = os.path.join(notebook_parent_dir, "training-notebook-staged.ipynb")
+    notebook_staged_path = os.path.join(
+        notebook_parent_dir, "training-notebook-staged.ipynb"
+    )
     kernel_id = f"{KAGGLE_USERNAME}/{PROJECT_SLUG}"
     dataset_id = f"{KAGGLE_USERNAME}/{DATASET_SLUG}"
     if not os.path.exists(notebook_abs_path):
-        raise FileNotFoundError(f"Could not find notebook at: {notebook_abs_path}")
+        raise Exception(f"Could not find notebook at: {notebook_abs_path}")
     metadata = {
         "id": kernel_id,
         "title": PROJECT_SLUG,
@@ -268,11 +333,11 @@ def train_model(
         "language": "python",
         "kernel_type": "notebook",
         "is_private": "true",
-        "enable_gpu": "false",
+        "enable_gpu": "true",
         "enable_internet": "true",
-        "dataset_sources": [], # [dataset_id],
+        "dataset_sources": [dataset_id],  # [dataset_id],
         "kernel_sources": [],
-        "competition_sources": []
+        "competition_sources": [],
     }
     with open(os.path.join(notebook_parent_dir, "kernel-metadata.json"), "w") as f:
         json.dump(metadata, f, indent=4)
@@ -281,18 +346,22 @@ def train_model(
     notebook = nbf.read(notebook_abs_path, as_version=4)
     if notebook.nbformat_minor < 5:
         notebook.nbformat_minor = 5
-    parameters = f"""
+
+    injected_cell = f"""
 # ------ HYPERPARAMETERS ------
-BATCH_SIZE = 12
-EPOCHS = 10
-LEARNING_RATE = 0.001
+BATCH_SIZE = {config.batch_size}
+EPOCHS = {config.epochs}
+LEARNING_RATE = {config.learning_rate}
+OPTIMIZER_str = "{config.optimizer_type.value}"
+CNN_str = "{config.cnn_type.value}"
+FINETUNE_DEPTH = {config.finetune_depth}
 
 # ------ PREFECT_RUN_ID ------
 PREFECT_RUN_ID = "{run_id}"
 EXPERIMENT_NAME = "{experiment_name}"
 RUN_NAME = "{run_name}"
 """
-    new = nbf.v4.new_code_cell(parameters)
+    new = nbf.v4.new_code_cell(injected_cell)
     notebook.cells.insert(2, new)
     if notebook.nbformat_minor < 5:
         notebook.nbformat_minor = 5
@@ -304,35 +373,73 @@ RUN_NAME = "{run_name}"
         logger.info("✅ Kernel pushed successfully.")
         os.remove(notebook_staged_path)
     except Exception as e:
-        logger.error(f"❌ Error pushing kernel: {e}")
-        raise e
+        raise Exception(f"Error pushing kernel: {e}")
 
     logger.info("\tPolling status loop...")
+    STOP_SIGNALS = {
+        KaggleKernelStatus.CANCELING,
+        KaggleKernelStatus.CANCEL_REQUESTED,
+        KaggleKernelStatus.CANCEL_ACKNOWLEDGED,
+    }
+    retry_count = 0
+
     while True:
         try:
             response = api.kernels_status(kernel_id)
-            raw_status = str(response.status)
-            status_clean = raw_status.split('.')[-1].lower()
-            logger.info(f"\tStatus: {status_clean.upper()} (Raw: {raw_status}) | Time: {time.strftime('%H:%M:%S')}")
 
-            if status_clean == 'complete':
+            # Clean and Normalize Status
+            raw_status_str = str(response.status)
+            status_clean = raw_status_str.split(".")[-1].lower()
+
+            logger.info(
+                f"\tStatus: {status_clean.upper()} (Raw: {raw_status_str}) | "
+                f"Time: {time.strftime('%H:%M:%S')}"
+            )
+
+            # --- 1. SUCCESS ---
+            if status_clean == KaggleKernelStatus.COMPLETE:
                 logger.info("\t✅ Kernel finished successfully!")
                 break
-            
-            elif status_clean == 'error':
-                failure_msg = str(response.failureMessage)
-                raise Exception(f"\t❌ Kaggle Training Failed: {failure_msg} | Time: {time.strftime('%H:%M:%S')}")
 
-            elif status_clean in ['queued', 'running', 'starting', 'canceling']:
+            # --- 2. FAILURE (Actual Kernel Crash) ---
+            elif status_clean == KaggleKernelStatus.ERROR:
+                failure_msg = str(
+                    getattr(response, "failureMessage", "No error message")
+                )
+                logger.error(f"\t⚠️ Kernel turned into warning or error: {failure_msg}")
+                break
+
+            # --- 3. FAIL FAST (Manual Cancellation) ---
+            elif status_clean in STOP_SIGNALS:
+                raise Exception(
+                    f"🛑 Kernel Cancelled by User (Status: {status_clean}). Aborting Flow."
+                )
+
+            # --- 4. WAIT (Only for healthy active states) ---
+            elif status_clean in [
+                KaggleKernelStatus.QUEUED,
+                KaggleKernelStatus.RUNNING,
+                KaggleKernelStatus.STARTING,
+            ]:
                 time.sleep(10)
-            
+                retry_count = 0
+
+            # --- 5. UNKNOWN ---
             else:
-                logger.warning(f"\t⚠️ Unknown state {status_clean}. Keep waiting...")
+                logger.warning(f"\t⚠️ Unknown state '{status_clean}'. Sleeping...")
                 time.sleep(20)
+                retry_count += 1
+                if retry_count > MAX_POLL_RETRIES:
+                    raise Exception(
+                        "❌ Kernel Failed: Max poll retries exceeded. Aborting Flow."
+                    )
 
         except Exception as e:
-            logger.error(f"\t❌ Error checking status: {e}")
-            raise Failed(message=f"Error checking status: {e}")
+            if "Kernel Cancelled by User" in str(e):
+                logger.error(f"\t⛔ {e}")
+            else:
+                logger.error(f"\t❌ Error checking status: {e}")
+            break
     return run_id
 
 
@@ -345,35 +452,60 @@ def evaluate_model(
     logger = get_run_logger()
     logger.info("📋 Beginning model evaluation...")
     client = MlflowClient("https://mlflow.lepcodes.com")
-    
+
     # Search Experiment
     experiment = client.get_experiment_by_name(experiment_name)
     if not experiment:
-        raise ValueError(f"Experiment '{experiment_name}' not found!")
-    
+        raise Exception(f"Experiment '{experiment_name}' not found!")
+
     # Get Challenger Run
     runs = client.search_runs(
         experiment_ids=[experiment.experiment_id],
-        filter_string=f"tags.prefect_run_id = '{run_id}'"
+        filter_string=f"tags.prefect_run_id = '{run_id}'",
     )
-    challenger_run = runs[0]
-    challenger_metric = challenger_run.data.metrics.get('accuracy_test', 0)
-    challenger_run_id = challenger_run.info.run_id
-    logger.info(f"\tChallenger found: {challenger_metric}")
+    if not runs:
+        raise Exception(f"Challenger run '{run_id}' not found!")
 
-    # Get Current Champion 
+    # Filter out the failed runs
+    valid_runs = [run for run in runs if run.info.status == "FINISHED"]
+    if not valid_runs or len(valid_runs) == 0:
+        raise Exception("All challenger runs failed!")
+
+    # Get Challenger Run
+    if len(valid_runs) == 1:
+        challenger_run = valid_runs[0]
+        challenger_metric = challenger_run.data.metrics.get("val_loss", 0)
+        logger.info(f"\tSingle challenger found: {challenger_run.info.status}")
+    else:
+        logger.info("\tMultiple challengers found. Choosing the best one...")
+        run_a = valid_runs[0]
+        run_b = valid_runs[1]
+
+        metric_a = run_a.data.metrics.get("val_loss", 0)
+        metric_b = run_b.data.metrics.get("val_loss", 0)
+
+        if metric_a < metric_b:
+            challenger_run = run_a
+            challenger_metric = metric_a
+            logger.info(f"\tWinner Challenger A with {challenger_metric:.2f} vs B with {metric_b:.2f}")
+        else:
+            challenger_run = run_b
+            challenger_metric = metric_b
+            logger.info(f"\tWinner Challenger B with {challenger_metric:.2f} vs A with {metric_a:.2f}")
+        challenger_run_id = challenger_run.info.run_id
+    # Get Current Champion
     try:
         logger.info("\tGetting Champion...")
         champion_info = client.get_model_version_by_alias(model_name, "champion")
         champion_run = client.get_run(champion_info.run_id)
-        champion_metric = champion_run.data.metrics.get('accuracy_test', 0)
+        champion_metric = champion_run.data.metrics.get("val_loss", float("inf"))
         logger.info(f"\tChampion found: {champion_metric}")
     except Exception as e:
         logger.info(f"\tNo Champion found: {e}")
-        champion_metric = 0
+        champion_metric = float("inf")
 
     # Update Champion
-    if challenger_metric > champion_metric:
+    if champion_metric > challenger_metric:
         # Register Champion to Model Registry
         logger.info("\tPromotion! Updating Champion...")
         try:
@@ -385,15 +517,18 @@ def evaluate_model(
             challenger_version = client.create_model_version(
                 name=model_name,
                 source=f"runs:/{challenger_run_id}/{model_name}",
-                run_id=challenger_run_id
+                run_id=challenger_run_id,
             )
-            client.set_registered_model_alias(model_name, "champion", challenger_version.version)
+            client.set_registered_model_alias(
+                model_name, "champion", challenger_version.version
+            )
             logger.info(f"\tChampion registered: {challenger_version.version}")
         except Exception as e:
             logger.info(f"\tError registering Champion: {e}")
     else:
         logger.info("\tNo Promotion. Keeping Champion...")
     return
+
 
 @task
 def deploy_model(data):
@@ -406,33 +541,58 @@ def test_flow(
     run_name: str,
     model_name: str = "avocado-model",
     experiment_name: str = "Avocado Ripening Experiment",
+    new_data: bool = False,
+    learning_rate: float = 0.001,
+    batch_size: int = 12,
+    epochs: int = 10,
+    optimizer_type: OptimizerType = OptimizerType.ADAM,
+    cnn_type: CNNType = CNNType.RESNET,
+    finetune_depth: int = 100,
 ):
     logger = get_run_logger()
+    try:
+        config = TrainingConfig(
+            learning_rate=learning_rate,
+            batch_size=batch_size,
+            epochs=epochs,
+            optimizer_type=optimizer_type,
+            cnn_type=cnn_type,
+        )
+    except Exception as e:
+        raise Exception(f"Error creating Training Configuration: {e}")
 
-    # # raw_data_path = fetch_data()
+    if new_data:
+        # Fetch new data
+        raw_data_path = fetch_data()
 
-    # # preprocessed_data_path = preprocess_data(raw_data_path)
+        # Preprocess new data
+        preprocessed_data_path = preprocess_data(raw_data_path)
 
-    # # upload_preprocessed_data(preprocessed_data_path, raw_data_path)
+        # Create dataset on Kaggle
+        upload_preprocessed_data(preprocessed_data_path, raw_data_path)
 
     # Get Run ID
     prefect_run_id = get_run_context().flow_run.id
     logger.info(f"Run ID: {prefect_run_id}")
 
+    # Training
     train_model(
         run_id=prefect_run_id,
         model_name=model_name,
         experiment_name=experiment_name,
         run_name=run_name,
+        config=config,
     )
 
+    # Evaluation
     evaluate_model(
-        run_id=prefect_run_id, 
+        run_id=prefect_run_id,
         model_name=model_name,
         experiment_name=experiment_name,
     )
+
     return
 
 
 if __name__ == "__main__":
-    test_flow.serve(name="my-first-deployment")
+    test_flow.serve(name="Test Deployment")
