@@ -23,7 +23,7 @@ deployments:
         networks: ["avocado-network"]
         env:
           MLFLOW_EXTERNAL_URI: "https://mlflow.lepcodes.com"
-          MLFLOW_INTERAL_URI: "http://mlflow:5000"
+          MLFLOW_INTERNAL_URI: "http://mlflow:5000"
           PREFECT_API_URL: "http://prefect-server:4200/api"
           PREFECT_LOGGING_LEVEL: "DEBUG"
           AWS_ACCESS_KEY_ID: "{{ $AWS_ACCESS_KEY_ID }}"
