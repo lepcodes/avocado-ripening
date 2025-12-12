@@ -9,6 +9,7 @@ import boto3
 import nbformat as nbf
 import numpy as np
 import pandas as pd
+import requests
 from botocore.client import Config
 from dotenv import load_dotenv
 from mlflow.tracking import MlflowClient
@@ -25,6 +26,7 @@ EPOCHS = 10
 LEARNING_RATE = 0.001
 FINETUNE_DEPTH = 100
 MAX_POLL_RETRIES = 10
+MLFLOW_INTERNAL_URI = os.environ["MLFLOW_INTERNAL_URI"]
 
 
 class OptimizerType(str, Enum):
@@ -47,9 +49,6 @@ class TrainingConfig(BaseModel):
     finetune_depth: int = FINETUNE_DEPTH
 
 
-from enum import Enum
-
-
 class KaggleKernelStatus(str, Enum):
     # --- Pending / Active States ---
     QUEUED = "queued"
@@ -67,6 +66,41 @@ class KaggleKernelStatus(str, Enum):
 
     # --- Unknown/Fallback ---
     UNKNOWN = "unknown"
+
+
+def get_external_mlflow_uri():
+    """
+    Determines the MLflow URI to send to Kaggle.
+    If set to 'GET_FROM_NGROK', it queries the local Ngrok service.
+    """
+    uri_config = os.getenv("MLFLOW_EXTERNAL_URI", "")
+
+    if uri_config != "GET_FROM_NGROK":
+        return uri_config
+
+    # --- DEV MODE: Dynamic Discovery ---
+    ngrok_api = "http://ngrok:4040/api/tunnels"
+    print(f"🕵️ Dev Mode detected. Hunting for Ngrok URL at {ngrok_api}...")
+
+    try:
+        for _ in range(5):
+            try:
+                response = requests.get(ngrok_api, timeout=2)
+                if response.status_code == 200:
+                    data = response.json()
+                    public_url = data["tunnels"][0]["public_url"]
+                    print(f"✅ Found Ngrok Tunnel: {public_url}")
+                    return public_url
+            except requests.exceptions.ConnectionError:
+                pass
+            time.sleep(1)
+
+        raise Exception(
+            "Could not connect to Ngrok API. Is the 'ngrok' service running?"
+        )
+
+    except Exception as e:
+        raise Exception(f"Failed to auto-discover Ngrok URL: {e}")
 
 
 def compute_overripeness_time(time_stamp, overripe_time_stamp):
@@ -300,17 +334,17 @@ def upload_preprocessed_data(processed_dir, raw_dir):
 @task
 def train_model(
     run_id: str,
-    model_name: str,
     experiment_name: str,
     run_name: str,
     config: TrainingConfig,
+    mlflow_uri: str,
 ):
     logger = get_run_logger()
     logger.info("📋 Beginning model training...")
     KAGGLE_USERNAME = "luispreciado99"
     PROJECT_SLUG = "avocado-ripening-notebook"
     DATASET_SLUG = "avocado-ripening-dataset"
-    NOTEBOOK_PATH = "notebooks/training-notebook-template.ipynb"
+    NOTEBOOK_PATH = "notebooks/test-notebook-template.ipynb"
 
     logger.info("\tAuthenticating with Kaggle API...")
     api = KaggleApi()
@@ -360,6 +394,7 @@ FINETUNE_DEPTH = {config.finetune_depth}
 PREFECT_RUN_ID = "{run_id}"
 EXPERIMENT_NAME = "{experiment_name}"
 RUN_NAME = "{run_name}"
+MLFLOW_URI = "{mlflow_uri}"
 """
     new = nbf.v4.new_code_cell(injected_cell)
     notebook.cells.insert(2, new)
@@ -448,10 +483,13 @@ def evaluate_model(
     run_id: str,
     model_name: str,
     experiment_name: str,
+    mlflow_uri: str,
 ):
     logger = get_run_logger()
     logger.info("📋 Beginning model evaluation...")
-    client = MlflowClient("https://mlflow.lepcodes.com")
+
+    logger.info("\tExtracting MLFlow Address...")
+    client = MlflowClient(mlflow_uri)
 
     # Search Experiment
     experiment = client.get_experiment_by_name(experiment_name)
@@ -487,11 +525,15 @@ def evaluate_model(
         if metric_a < metric_b:
             challenger_run = run_a
             challenger_metric = metric_a
-            logger.info(f"\tWinner Challenger A with {challenger_metric:.2f} vs B with {metric_b:.2f}")
+            logger.info(
+                f"\tWinner Challenger A with {challenger_metric:.2f} vs B with {metric_b:.2f}"
+            )
         else:
             challenger_run = run_b
             challenger_metric = metric_b
-            logger.info(f"\tWinner Challenger B with {challenger_metric:.2f} vs A with {metric_a:.2f}")
+            logger.info(
+                f"\tWinner Challenger B with {challenger_metric:.2f} vs A with {metric_a:.2f}"
+            )
         challenger_run_id = challenger_run.info.run_id
     # Get Current Champion
     try:
@@ -523,17 +565,33 @@ def evaluate_model(
                 model_name, "champion", challenger_version.version
             )
             logger.info(f"\tChampion registered: {challenger_version.version}")
+            return True
         except Exception as e:
             logger.info(f"\tError registering Champion: {e}")
     else:
         logger.info("\tNo Promotion. Keeping Champion...")
-    return
+        return False
+    return False
 
 
 @task
-def deploy_model(data):
-    print("Deploying model")
-    return data
+def deploy_model(
+    should_deploy: bool,
+):
+    logger = get_run_logger()
+
+    if not should_deploy:
+        logger.info("🚫 Evaluation failed or no improvement. Skipping Deployment.")
+        return
+
+    logger.info("🚀 Triggering Model Update in Inference API...")
+    try:
+        response = requests.post("http://avocado-base:80/reload-model")
+        response.raise_for_status()
+        logger.info("✅ Deployment Triggered Successfully.")
+    except Exception as e:
+        logger.error(f"❌ Failed to trigger deployment: {e}")
+        raise e
 
 
 @flow
@@ -550,6 +608,11 @@ def test_flow(
     finetune_depth: int = 100,
 ):
     logger = get_run_logger()
+
+    MLFLOW_EXTERNAL_URI = get_external_mlflow_uri()
+    logger.info(f"MLflow External URI: {MLFLOW_EXTERNAL_URI}")
+    logger.info(f"MLflow Internal URI: {MLFLOW_INTERNAL_URI}")
+
     try:
         config = TrainingConfig(
             learning_rate=learning_rate,
@@ -557,10 +620,12 @@ def test_flow(
             epochs=epochs,
             optimizer_type=optimizer_type,
             cnn_type=cnn_type,
+            finetune_depth=finetune_depth,
         )
     except Exception as e:
         raise Exception(f"Error creating Training Configuration: {e}")
 
+    # Check if ETL pipeline is needed
     if new_data:
         # Fetch new data
         raw_data_path = fetch_data()
@@ -578,19 +643,23 @@ def test_flow(
     # Training
     train_model(
         run_id=prefect_run_id,
-        model_name=model_name,
         experiment_name=experiment_name,
         run_name=run_name,
         config=config,
+        mlflow_uri=MLFLOW_EXTERNAL_URI,
     )
 
     # Evaluation
-    evaluate_model(
+    should_deploy = evaluate_model(
         run_id=prefect_run_id,
         model_name=model_name,
         experiment_name=experiment_name,
+        mlflow_uri=MLFLOW_INTERNAL_URI,
     )
 
+    # Deployment
+    if should_deploy:
+        deploy_model(should_deploy=should_deploy)
     return
 
 
