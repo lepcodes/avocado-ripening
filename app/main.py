@@ -149,7 +149,9 @@ async def health():
     """A simple health check endpoint."""
     try:
         logger.info("Checking model health...")
-        _ = models["model"].predict([1, 1])
+        dummy_img = np.zeros((1, 224, 224, 3))
+        dummy_cond = np.zeros((1, 3))
+        _ = models["model"].predict({"image_input": dummy_img, "condition_input": dummy_cond})
         return {"message": "Model is healthy"}
     except Exception as e:
         logger.error(f"Error checking model health: {e}")
