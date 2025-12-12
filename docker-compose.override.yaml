@@ -1,106 +1,55 @@
 services:
-  postgres:
-    image: postgres:14
-    environment:
-      POSTGRES_USER: prefect
-      POSTGRES_PASSWORD: prefect
-      POSTGRES_DB: prefect
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U prefect"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - avocado-network
-
-  redis:
-    image: redis:7
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - avocado-network
-
   prefect-server:
-    image: prefecthq/prefect:3-latest
-    container_name: prefect-server
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      # Critical for UI to work from browser
-      PREFECT_UI_API_URL: http://localhost:4200/api
-      
-      # Database & Network Config
-      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@postgres:5432/prefect
-      PREFECT_SERVER_API_HOST: 0.0.0.0
-      PREFECT_API_URL: http://0.0.0.0:4200/api
-      
-      # Redis Config
-      PREFECT_MESSAGING_BROKER: prefect_redis.messaging
-      PREFECT_MESSAGING_CACHE: prefect_redis.messaging
-      PREFECT_REDIS_MESSAGING_HOST: redis
-      PREFECT_REDIS_MESSAGING_PORT: 6379
-      PREFECT_REDIS_MESSAGING_DB: 0
-    # command changed: Removed '--no-services' so this container does everything
-    command: prefect server start --host 0.0.0.0
     ports:
       - "4200:4200"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')"]
-      interval: 10s
-      timeout: 10s
-      retries: 5
-      start_period: 10s
-    networks:
-      - avocado-network
 
-  prefect-worker:
-    image: prefecthq/prefect:3-latest
-    container_name: prefect-worker
-    command: prefect worker start --pool oci-docker-pool --type docker --install-policy always
-    restart: always
-    depends_on:
-      prefect-server:
-        condition: service_healthy
-    environment:
-      PREFECT_API_URL: http://prefect-server:4200/api
+  avocado-api:
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ./app:/code/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 80 --reload
+    ports:
+      - "8080:80"
+
+  postgres-dev:
+    image: postgres:14
+    environment:
+      POSTGRES_USER: dev_user
+      POSTGRES_PASSWORD: dev_password
+      POSTGRES_DB: mlflow_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
     networks:
       - avocado-network
 
-  # avocado-base:
-  #   container_name: avocado-base
-  #   image: lepcodes/avocado-base:latest
-  #   command: uvicorn src.main:app --host 0.0.0.0 --port 80 --reload
-  #   ports:
-  #   - "8080:80"
-  #   volumes:
-  #   - ./models:/app/models
-  #   - ./src:/app/src
-  #   environment:
-  #   - MODEL_NAME={your_model_name}.keras
-  #   - MODEL_DIR=/app/models
-  #   - TF_ENABLE_ONEDNN_OPTS=0
-  #   - TF_CPP_MIN_LOG_LEVEL=2
-  #   restart: unless-stopped
-  #   networks:
-  #     - avocado-network
+  mlflow:
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://dev_user:dev_password@postgres-dev:5432/mlflow_dev
+      --artifacts-destination s3://ampere-instance-bucket
+      --serve-artifacts
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    depends_on:
+      - postgres-dev
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    command: "http mlflow:5000"
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    ports:
+      - "4040:4040"
+    networks:
+      - avocado-network
+    depends_on:
+      - mlflow
 
 volumes:
-  postgres_data:
-  redis_data:
-
-networks:
-  avocado-network:
-    driver: bridge
-    name: avocado-network
+  postgres_dev_data:
