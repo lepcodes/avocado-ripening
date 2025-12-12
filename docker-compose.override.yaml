@@ -1,5 +1,7 @@
 services:
   prefect-server:
+    environment:
+      PREFECT_UI_API_URL: http://localhost:4200/api
     ports:
       - "4200:4200"
 
