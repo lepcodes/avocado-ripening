@@ -1,7 +1,6 @@
 import io
 import logging
 import os
-import shutil
 from contextlib import asynccontextmanager
 from enum import Enum
 from typing import List, Optional
@@ -9,16 +8,17 @@ from typing import List, Optional
 import mlflow.pyfunc
 import numpy as np
 import requests
+import tensorflow as tf
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from mlflow.artifacts import download_artifacts
-import tensorflow as tf
 from PIL import Image
 from pydantic import BaseModel
-from dotenv import load_dotenv
+
 import mlflow
 
 load_dotenv()
+
 
 class StorageCondition(str, Enum):
     T10 = "T10"
@@ -47,49 +47,15 @@ MODEL_LOCAL_PATH = "models/avocado-model"
 MLFLOW_TRACKING_URI = os.environ["MLFLOW_INTERNAL_URI"]
 
 
-def download_artifacts_from_mlflow():
-    """
-    Downloads the exact artifact files from the registry to local disk.
-    Does NOT load them into RAM.
-    """
-    try:
-        logger.info("⬇️ Downloading Champion artifacts from MLFlow...")
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-
-        model_uri = "models:/avocado-model@champion"
-
-        if os.path.exists(MODEL_LOCAL_PATH):
-            shutil.rmtree(MODEL_LOCAL_PATH)
-
-        os.makedirs(MODEL_LOCAL_PATH, exist_ok=True)
-        
-        download_artifacts(
-            artifact_uri=model_uri,
-            dst_path=MODEL_LOCAL_PATH
-        )
-
-        nested_dir = os.path.join(MODEL_LOCAL_PATH, "avocado-model")
-        if os.path.exists(nested_dir):
-            logger.warning("⚠️ Nested directory detected! Flattening structure...")
-            for filename in os.listdir(nested_dir):
-                shutil.move(os.path.join(nested_dir, filename), MODEL_LOCAL_PATH)
-            os.rmdir(nested_dir)
-    
-        logger.info("✅ Artifacts downloaded successfully.")
-    except Exception as e:
-        logger.error(f"❌ Error downloading artifacts: {e}")
-        raise e
-
-
 def load_model_into_memory():
     """
     Loads the model from the LOCAL disk into the global dictionary.
     """
     try:
-        logger.info(f"🧠 Loading model into RAM from {MODEL_LOCAL_PATH}...")
+        logger.info("🧠 Loading model into RAM from...")
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
         tf.keras.config.enable_unsafe_deserialization()
-        print(f"🧠 Loading model into RAM from {MODEL_LOCAL_PATH}...")
-        models["model"] = mlflow.pyfunc.load_model(MODEL_LOCAL_PATH)
+        models["model"] = mlflow.tensorflow.load_model("models:/avocado-model@champion")
         logger.info("✅ Model loaded into memory.")
     except Exception as e:
         logger.error(f"❌ Error loading model into memory: {e}")
@@ -99,11 +65,7 @@ def load_model_into_memory():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Application startup...")
-    if not os.path.exists(MODEL_LOCAL_PATH):
-        download_artifacts_from_mlflow()
-        logger.info("Model artifacts downloaded. (Not cached)")
-    else:
-        logger.info("Model artifacts already downloaded. (Cached)")
+    logger.info(f"MLflow Internal URI:d {MLFLOW_TRACKING_URI}")
     load_model_into_memory()
     yield
     logger.info("Application shutdown: Cleaning up resources...")
@@ -151,7 +113,9 @@ async def health():
         logger.info("Checking model health...")
         dummy_img = np.zeros((1, 224, 224, 3))
         dummy_cond = np.zeros((1, 3))
-        _ = models["model"].predict({"image_input": dummy_img, "condition_input": dummy_cond})
+        _ = models["model"].predict(
+            {"image_input": dummy_img, "condition_input": dummy_cond}
+        )
         return {"message": "Model is healthy"}
     except Exception as e:
         logger.error(f"Error checking model health: {e}")
@@ -161,10 +125,8 @@ async def health():
 @app.post("/reload-model")
 async def reload_model():
     """Reload the model from MLFlow."""
-    print("Reloading model from MLFlow...")
     try:
         logger.info("Reloading model from MLFlow...")
-        download_artifacts_from_mlflow()
         load_model_into_memory()
         return {"message": "Model reloaded"}
     except Exception as e:
