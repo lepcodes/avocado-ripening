@@ -1,17 +1,23 @@
-from fastapi import FastAPI
-from fastapi import UploadFile, File, Form, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
+import io
+import logging
+import os
 from contextlib import asynccontextmanager
-from tensorflow import keras
 from enum import Enum
-from typing import List
-from pydantic import BaseModel
-from PIL import Image
+from typing import List, Optional
+
+import mlflow.pyfunc
 import numpy as np
 import requests
-import io
-import os
+import tensorflow as tf
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image
+from pydantic import BaseModel
+
+import mlflow
+
+load_dotenv()
 
 
 class StorageCondition(str, Enum):
@@ -28,35 +34,41 @@ class PredictionResponse(BaseModel):
     prediction: List[Prediction]
 
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
 models = {}
+
+MODEL_LOCAL_PATH = "models/avocado-model"
+MLFLOW_TRACKING_URI = os.environ["MLFLOW_INTERNAL_URI"]
+
+
+def load_model_into_memory():
+    """
+    Loads the model from the LOCAL disk into the global dictionary.
+    """
+    try:
+        logger.info("🧠 Loading model into RAM from...")
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        tf.keras.config.enable_unsafe_deserialization()
+        models["model"] = mlflow.tensorflow.load_model("models:/avocado-model@champion")
+        logger.info("✅ Model loaded into memory.")
+    except Exception as e:
+        logger.error(f"❌ Error loading model into memory: {e}")
+        raise e
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # This code runs ONCE on application startup
-    print("Application startup: Loading model...")
-
-    # The path inside the container where models are mounted
-    model_dir = os.getenv("MODEL_DIR")
-    if not model_dir:
-        raise ValueError("Environment variable 'MODEL_DIR' is not set.")
-
-    model_name = os.getenv("MODEL_NAME")
-
-    if not model_name:
-        raise ValueError("Environment variable 'MODEL_NAME' is not set.")
-
-    model_path = os.path.join(model_dir, model_name)
-    try:
-        models["model"] = keras.models.load_model(model_path)
-        print(f"Successfully loaded model from: {model_path}")
-    except FileNotFoundError:
-        raise RuntimeError(f"Model file not found at: {model_path}")
-
+    logger.info("Application startup...")
+    logger.info(f"MLflow Internal URI:d {MLFLOW_TRACKING_URI}")
+    load_model_into_memory()
     yield
-
-    # This code runs ONCE on application shutdown
-    print("Application shutdown: Cleaning up resources...")
+    logger.info("Application shutdown: Cleaning up resources...")
     models.clear()
 
 
@@ -92,6 +104,34 @@ async def validate_image_pil(file: UploadFile):
 async def root():
     """A simple root endpoint."""
     return {"message": "Welcome to avocado-ripening API"}
+
+
+@app.get("/health")
+async def health():
+    """A simple health check endpoint."""
+    try:
+        logger.info("Checking model health...")
+        dummy_img = np.zeros((1, 224, 224, 3))
+        dummy_cond = np.zeros((1, 3))
+        _ = models["model"].predict(
+            {"image_input": dummy_img, "condition_input": dummy_cond}
+        )
+        return {"message": "Model is healthy"}
+    except Exception as e:
+        logger.error(f"Error checking model health: {e}")
+        raise HTTPException(status_code=500, detail=f"Error checking model health: {e}")
+
+
+@app.post("/reload-model")
+async def reload_model():
+    """Reload the model from MLFlow."""
+    try:
+        logger.info("Reloading model from MLFlow...")
+        load_model_into_memory()
+        return {"message": "Model reloaded"}
+    except Exception as e:
+        logger.error(f"Error reloading model: {e}")
+        raise HTTPException(status_code=500, detail=f"Error reloading model: {e}")
 
 
 @app.post("/predict")
@@ -158,6 +198,8 @@ async def predict(
     try:
         y = models["model"].predict(x)
         prediction = y[0][0]
-        return PredictionResponse(prediction=[Prediction(estimated_days=float(prediction))])
+        return PredictionResponse(
+            prediction=[Prediction(estimated_days=float(prediction))]
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

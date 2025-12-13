@@ -1,16 +1,139 @@
 services:
-  api:
-    container_name: avocado-api
-    build: .
-    command: uvicorn src.main:app --host 0.0.0.0 --port 80 --reload
-    ports:
-      - "8080:80"
-    volumes:
-      - ./models:/app/models
-      - ./src:/app/src
+  postgres:
+    image: postgres:14
     environment:
-      - MODEL_NAME=best_avocado_finetune_model.keras
-      - MODEL_DIR=/app/models
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: prefect
+      POSTGRES_DB: prefect
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - avocado-network
+
+  redis:
+    image: redis:7
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - avocado-network
+
+  prefect-server:
+    image: prefecthq/prefect:3-latest
+    container_name: prefect-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PREFECT_UI_API_URL: https://prefect.lepcodes.com/api
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@postgres:5432/prefect
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      PREFECT_API_URL: http://0.0.0.0:4200/api
+      PREFECT_MESSAGING_BROKER: prefect_redis.messaging
+      PREFECT_MESSAGING_CACHE: prefect_redis.messaging
+      PREFECT_REDIS_MESSAGING_HOST: redis
+      PREFECT_REDIS_MESSAGING_PORT: 6379
+      PREFECT_REDIS_MESSAGING_DB: 0
+      PREFECT_SERVER_UI_SHOW_PROMOTIONAL_CONTENT: "false"
+    command: prefect server start --host 0.0.0.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    networks:
+      - avocado-network
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.prefect-router.rule=Host(`prefect.lepcodes.com`)"
+      - "traefik.http.routers.prefect-router.entrypoints=websecure"
+      - "traefik.http.routers.prefect-router.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.prefect-router.tls=true"
+      - "traefik.http.routers.prefect-router.middlewares=prefect-auth"
+      - "traefik.http.middlewares.prefect-auth.basicauth.users=admin:$$2a$$12$$lP1agLIpjMyEutumarL8SeKrhdRpduzxXSG8pvGuM9MFp2.9XmaK2"
+      - "traefik.http.services.prefect-service.loadbalancer.server.port=4200"
+
+  prefect-worker:
+    image: prefecthq/prefect:3-latest
+    container_name: prefect-worker
+    command: prefect worker start --pool oci-docker-pool --type docker --install-policy always
+    restart: always
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - avocado-network
+
+  avocado-api:
+    container_name: avocado-api
+    image: lepcodes/avocado-base:latest
+    command: uvicorn app.main:app --host 0.0.0.0 --port 80
+    environment:
+      - MLFLOW_INTERNAL_URI=http://mlflow:5000
+      - MLFLOW_EXTERNAL_URI=https://mlflow.lepcodes.com
       - TF_ENABLE_ONEDNN_OPTS=0
       - TF_CPP_MIN_LOG_LEVEL=2
     restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api-router.rule=Host(`api.lepcodes.com`)"
+      - "traefik.http.routers.api-router.entrypoints=websecure"
+      - "traefik.http.routers.api-router.tls=true"
+      - "traefik.http.routers.api-router.tls.certresolver=letsencrypt"
+      - "traefik.http.services.api-service.loadbalancer.server.port=80"
+    networks:
+      - proxy
+      - avocado-network
+
+  mlflow:
+    container_name: mlflow-oci-server
+    image: lepcodes/mlflow-oci-server
+    restart: unless-stopped
+    networks:
+      - proxy
+      - avocado-network
+    env_file:
+      - .env
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri mysql+mysqlconnector://mlflow_admin:Database_0@10.0.0.146:3306/mlflow_db
+      --artifacts-destination s3://ampere-instance-bucket
+      --serve-artifacts
+     # --app-name basic-auth
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mlflow-router.rule=Host(`mlflow.lepcodes.com`)"
+      - "traefik.http.routers.mlflow-router.entrypoints=websecure"
+      - "traefik.http.routers.mlflow-router.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.mlflow-router.tls=true"
+      - "traefik.http.services.mlflow-service.loadbalancer.server.port=5000"
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  avocado-network:
+    driver: bridge
+    name: avocado-network
+  proxy:
+    external: true

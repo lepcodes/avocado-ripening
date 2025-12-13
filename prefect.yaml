@@ -1,0 +1,61 @@
+# prefect.yaml
+name: avocado-project
+prefect-version: 3.6.2
+
+build: null
+push: null
+
+deployments:
+  - name: "Production Deployment"
+    description: "Retrains the avocado model using new data."
+    version: "{{ git_commit_sha }}"
+    tags: ["prod", "training"]
+    entrypoint: "pipelines/flows.py:test_flow" 
+    pull:
+      - prefect.deployments.steps.git_clone:
+          repository: https://github.com/lepcodes/avocado-ripening.git
+          branch: feature/pipelines
+    work_pool:
+      name: "oci-docker-pool"
+      job_variables:
+        image: "lepcodes/avocado-base:latest"
+        image_pull_policy: "Always"
+        networks: ["avocado-network"]
+        env:
+          MLFLOW_EXTERNAL_URI: "https://mlflow.lepcodes.com"
+          MLFLOW_INTERNAL_URI: "http://mlflow:5000"
+          PREFECT_API_URL: "http://prefect-server:4200/api"
+          PREFECT_LOGGING_LEVEL: "DEBUG"
+          AWS_ACCESS_KEY_ID: "{{ $AWS_ACCESS_KEY_ID }}"
+          AWS_SECRET_ACCESS_KEY: "{{ $AWS_SECRET_ACCESS_KEY }}"
+          OCI_ENDPOINT_URL: "{{ $OCI_ENDPOINT_URL }}"
+          KAGGLE_USERNAME: "{{ $KAGGLE_USERNAME }}"
+          KAGGLE_KEY: "{{ $KAGGLE_KEY }}"
+
+  - name: "Local Dev Deployment"
+    description: "Runs the flow using LOCAL code mapped into the container."
+    version: "dev-local"
+    tags: ["dev", "local-test"]
+    entrypoint: "pipelines/flows.py:test_flow"
+    pull:
+      - prefect.deployments.steps.set_working_directory:
+          directory: /code
+    work_pool:
+      name: "oci-docker-pool"
+      job_variables:
+        image: "lepcodes/avocado-base:latest"
+        image_pull_policy: "Never"
+        networks: ["avocado-network"]
+        stream_output: true
+        volumes: ["//c/Users/Luis/Documents/ML-AI-Projects/avocado-ripening:/code"]
+        env:
+          PYTHONPATH: "/code"
+          MLFLOW_EXTERNAL_URI: "GET_FROM_NGROK"
+          MLFLOW_INTERNAL_URI: "http://mlflow:5000"
+          PREFECT_API_URL: "http://prefect-server:4200/api"
+          AWS_ACCESS_KEY_ID: "{{ $AWS_ACCESS_KEY_ID }}"
+          AWS_SECRET_ACCESS_KEY: "{{ $AWS_SECRET_ACCESS_KEY }}"
+          OCI_ENDPOINT_URL: "{{ $OCI_ENDPOINT_URL }}"
+          KAGGLE_USERNAME: "{{ $KAGGLE_USERNAME }}"
+          KAGGLE_KEY: "{{ $KAGGLE_KEY }}"
+    

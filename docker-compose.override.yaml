@@ -1,0 +1,57 @@
+services:
+  prefect-server:
+    environment:
+      PREFECT_UI_API_URL: http://localhost:4200/api
+    ports:
+      - "4200:4200"
+
+  avocado-api:
+    volumes:
+      - ./app:/code/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 80 --reload
+    ports:
+      - "8080:80"
+
+  postgres-dev:
+    image: postgres:14
+    environment:
+      POSTGRES_USER: dev_user
+      POSTGRES_PASSWORD: dev_password
+      POSTGRES_DB: mlflow_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    networks:
+      - avocado-network
+
+  mlflow:
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://dev_user:dev_password@postgres-dev:5432/mlflow_dev
+      --artifacts-destination s3://ampere-instance-bucket
+      --serve-artifacts
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    depends_on:
+      - postgres-dev
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    command: "http mlflow:5000"
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    ports:
+      - "4040:4040"
+    networks:
+      - avocado-network
+    depends_on:
+      - mlflow
+
+volumes:
+  postgres_dev_data:
