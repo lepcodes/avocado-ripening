@@ -336,6 +336,7 @@ def train_model(
     run_id: str,
     experiment_name: str,
     run_name: str,
+    model_name: str,
     config: TrainingConfig,
     mlflow_uri: str,
 ):
@@ -344,7 +345,7 @@ def train_model(
     KAGGLE_USERNAME = "luispreciado99"
     PROJECT_SLUG = "avocado-ripening-notebook"
     DATASET_SLUG = "avocado-ripening-dataset"
-    NOTEBOOK_PATH = "notebooks/test-notebook-template.ipynb"
+    NOTEBOOK_PATH = "notebooks/training-notebook-template.ipynb"
 
     logger.info("\tAuthenticating with Kaggle API...")
     api = KaggleApi()
@@ -394,6 +395,7 @@ FINETUNE_DEPTH = {config.finetune_depth}
 PREFECT_RUN_ID = "{run_id}"
 EXPERIMENT_NAME = "{experiment_name}"
 RUN_NAME = "{run_name}"
+MODEL_NAME = "{model_name}"
 MLFLOW_URI = "{mlflow_uri}"
 """
     new = nbf.v4.new_code_cell(injected_cell)
@@ -512,6 +514,7 @@ def evaluate_model(
     # Get Challenger Run
     if len(valid_runs) == 1:
         challenger_run = valid_runs[0]
+        challenger_run_id = challenger_run.info.run_id
         challenger_metric = challenger_run.data.metrics.get("val_loss", 0)
         logger.info(f"\tSingle challenger found: {challenger_run.info.status}")
     else:
@@ -535,6 +538,21 @@ def evaluate_model(
                 f"\tWinner Challenger B with {challenger_metric:.2f} vs A with {metric_a:.2f}"
             )
         challenger_run_id = challenger_run.info.run_id
+
+    # Set challenger alias
+    try:
+        versions = client.search_model_versions(f"name = '{model_name}' and run_id = '{challenger_run_id}'")
+        if not versions:
+            raise Exception("No model versions found for challenger run")
+
+        logger.info(f"\tChallenger version: {versions}")
+        model_version = max(versions, key=lambda v: int(v.version))
+        client.set_registered_model_alias(model_name, "challenger", model_version.version)
+        logger.info(f"\tChallenger alias registered: {model_version.version}")
+    except Exception as e:
+        logger.info(f"\tError registering Challenger Alias: {e}")
+        return False
+
     # Get Current Champion
     try:
         logger.info("\tGetting Champion...")
@@ -548,26 +566,20 @@ def evaluate_model(
 
     # Update Champion
     if champion_metric > challenger_metric:
-        # Register Champion to Model Registry
         logger.info("\tPromotion! Updating Champion...")
+        # Check if model registry exists
         try:
             client.create_registered_model(model_name)
         except Exception as e:
-            logger.info(f"\tChampion already registered: {e}")
+            logger.info(f"\tModel registry creration yielded: {e}")
 
         try:
-            challenger_version = client.create_model_version(
-                name=model_name,
-                source=f"runs:/{challenger_run_id}/{model_name}",
-                run_id=challenger_run_id,
-            )
-            client.set_registered_model_alias(
-                model_name, "champion", challenger_version.version
-            )
-            logger.info(f"\tChampion registered: {challenger_version.version}")
+            client.set_registered_model_alias(model_name, "champion", model_version.version)
+            logger.info(f"\tChampion alias registered: {model_version.version}")
             return True
         except Exception as e:
-            logger.info(f"\tError registering Champion: {e}")
+            logger.info(f"\tError registering Champion Alias: {e}")
+            return False
     else:
         logger.info("\tNo Promotion. Keeping Champion...")
         return False
@@ -586,7 +598,7 @@ def deploy_model(
 
     logger.info("🚀 Triggering Model Update in Inference API...")
     try:
-        response = requests.post("http://avocado-base:80/reload-model")
+        response = requests.post("http://avocado-api:80/reload-model")
         response.raise_for_status()
         logger.info("✅ Deployment Triggered Successfully.")
     except Exception as e:
@@ -645,6 +657,7 @@ def test_flow(
         run_id=prefect_run_id,
         experiment_name=experiment_name,
         run_name=run_name,
+        model_name=model_name,
         config=config,
         mlflow_uri=MLFLOW_EXTERNAL_URI,
     )
