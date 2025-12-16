@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+import mlflow.tensorflow 
+import requests
 
 # 1. Mock Environment Variables FIRST
 os.environ["MLFLOW_INTERNAL_URI"] = "http://mock-server"
