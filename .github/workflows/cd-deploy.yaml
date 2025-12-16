@@ -3,15 +3,12 @@ name: CD Deployment
 on:
   workflow_run:
     workflows: ["CI Tests"]
-    branches: ["main"]
-    types: 
+    types:
       - completed
 
 env:
-  # The folder on your OCI VM where the app actually runs
-  PROD_DIR: /home/opc/avocado-ripening
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  PROD_DIR: /home/ubuntu/avocado-ripening
+  IMAGE_NAME: lepcodes/avocado-base
 
 jobs:
   deploy:
@@ -22,22 +19,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. Build Image
-      - name: Build
-        run: | 
-          docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest .
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
-      # 2. Inject Secrets & Config
+      - name: Build & Push Image
+        run: | 
+          docker build -t ${{ env.IMAGE_NAME }}:latest .
+          docker push ${{ env.IMAGE_NAME }}:latest
+
       - name: Update Config
         run: |
           mkdir -p ${{ env.PROD_DIR }}
-          cp docker-compose.yml ${{ env.PROD_DIR }}/
+          cp docker-compose.yaml ${{ env.PROD_DIR }}/
           echo "${{ secrets.PROD_ENV_FILE }}" > ${{ env.PROD_DIR }}/.env
 
-      # 3. Restart
-      - name: Deploy
+      - name: Deploy to OCI
         run: |
           cd ${{ env.PROD_DIR }}
           docker compose up -d --remove-orphans
-          docker image prune -f
+          docker image prune -f  
