@@ -1,11 +1,11 @@
 [build-system]
-requires = ["flit_core >=3.2,<4"]
-build-backend = "flit_core.buildapi"
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "avocado_ripening"
+name = "avocado-ripening"
 version = "0.0.1"
-description = "A short description of the project."
+description = "A Deep Learning project for predicting the ripening of avocado images."
 authors = [
   { name = "lepcodes" },
 ]
@@ -13,7 +13,9 @@ authors = [
 readme = "README.md"
 classifiers = [
     "Programming Language :: Python :: 3",
-    
 ]
 requires-python = "~=3.10.0"
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
