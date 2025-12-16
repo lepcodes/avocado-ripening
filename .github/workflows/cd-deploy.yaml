@@ -1,11 +1,10 @@
 name: CD Deployment
 
 on:
-  workflow_run:
-    workflows: ["CI Tests"]
+  pull_request:
     branches: ["main"]
-    types: 
-      - completed
+  push:
+    branches: ["main"]
 
 env:
   # The folder on your OCI VM where the app actually runs
@@ -16,7 +15,7 @@ env:
 jobs:
   deploy:
     runs-on: [self-hosted, linux, ARM64]
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Checkout
@@ -25,8 +24,8 @@ jobs:
       # 1. Build Image
       - name: Build
         run: | 
-          docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest .
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          sudo docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest .
+          sudo docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
       # 2. Inject Secrets & Config
       - name: Update Config
@@ -39,5 +38,5 @@ jobs:
       - name: Deploy
         run: |
           cd ${{ env.PROD_DIR }}
-          docker compose up -d --remove-orphans
-          docker image prune -f
+          sudo docker compose up -d --remove-orphans
+          sudo docker image prune -f
