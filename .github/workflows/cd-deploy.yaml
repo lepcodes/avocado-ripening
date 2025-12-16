@@ -5,6 +5,7 @@ on:
     workflows: ["CI Tests"]
     types:
       - completed
+  workflow_dispatch:
 
 env:
   PROD_DIR: /home/ubuntu/avocado-ripening
@@ -13,7 +14,7 @@ env:
 jobs:
   deploy:
     runs-on: [self-hosted, linux, ARM64]
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || github.event_name == 'workflow_dispatch' }}
 
     steps:
       - name: Checkout
