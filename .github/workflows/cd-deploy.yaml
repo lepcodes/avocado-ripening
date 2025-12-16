@@ -33,7 +33,7 @@ jobs:
       - name: Update Config
         run: |
           mkdir -p ${{ env.PROD_DIR }}
-          cp docker-compose.yml ${{ env.PROD_DIR }}/
+          cp docker-compose.yaml ${{ env.PROD_DIR }}/
           echo "${{ secrets.PROD_ENV_FILE }}" > ${{ env.PROD_DIR }}/.env
 
       - name: Deploy to OCI
