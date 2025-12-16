@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager
 from enum import Enum
 from typing import List, Optional
 
-import mlflow.pyfunc
 import numpy as np
 import requests
 import tensorflow as tf

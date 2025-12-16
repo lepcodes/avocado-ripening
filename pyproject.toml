@@ -5,7 +5,7 @@ build-backend = "flit_core.buildapi"
 [project]
 name = "avocado_ripening"
 version = "0.0.1"
-description = "A short description of the project."
+description = "A Deep Learning project for predicting the ripening of avocado images."
 authors = [
   { name = "lepcodes" },
 ]
