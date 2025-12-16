@@ -40,5 +40,5 @@ jobs:
       - name: Deploy to OCI
         run: |
           cd ${{ env.PROD_DIR }}
-          docker compose up -d --remove-orphans
+          docker compose up -d --force-recreate --remove-orphans
           docker image prune -f  
