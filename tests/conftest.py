@@ -1,17 +1,15 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import mlflow.tensorflow
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
-import mlflow.tensorflow 
 import requests
+from fastapi.testclient import TestClient
 
-# 1. Mock Environment Variables FIRST
 os.environ["MLFLOW_INTERNAL_URI"] = "http://mock-server"
 
 
-# 2. Define the Dummy Model (The "Fake Reality")
 class MockKerasModel:
     """
     Acts exactly like your loaded TF model.
@@ -33,14 +31,11 @@ def mock_external_deps():
     """
     mock_model_instance = MockKerasModel()
 
-    # PATCH 1: Stop MLflow from hitting the network/disk
-    # We patch 'mlflow.tensorflow.load_model' because that is what your main.py calls.
-    with patch("mlflow.tensorflow.load_model", return_value=mock_model_instance):
-        # PATCH 2: Stop mlflow.set_tracking_uri from doing anything
+    with patch.object(
+        mlflow.tensorflow, "load_model", return_value=mock_model_instance
+    ):
         with patch("mlflow.set_tracking_uri"):
-            # PATCH 3: Stop requests.get (for the image URL feature)
-            # We return a valid fake image response
-            with patch("requests.get") as mock_requests:
+            with patch.object(requests, "get") as mock_requests:
                 # Setup a fake response for requests
                 mock_response = MagicMock()
                 mock_response.status_code = 200
@@ -59,14 +54,12 @@ def mock_external_deps():
                 yield mock_model_instance
 
 
-# 4. The Client (The Trigger)
 @pytest.fixture(scope="function")
 def client(mock_external_deps):
     """
     Creates the client. Crucially, 'mock_external_deps' is passed in,
     ensuring mocks are active BEFORE the app starts up and runs lifespan.
     """
-    # Import app here to avoid loading it before env vars are set
     from app.main import app
 
     # TestClient(app) triggers the lifespan (startup) event
