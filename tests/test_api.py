@@ -31,7 +31,6 @@ def test_predict_upload_file(client):
 
     assert response.status_code == 200
     json_resp = response.json()
-    # Our MockKerasModel returns 3.5
     assert json_resp["prediction"][0]["estimated_days"] == 3.5
 
 
@@ -58,8 +57,6 @@ def test_validation_no_image(client):
     """
     data = {"storage_condition": "Tam"}
     response = client.post("/predict", data=data)
-
-    # Your code manually raises 400 if image data is missing
     assert response.status_code == 400
     assert "Image data missing" in response.json()["detail"]
 
@@ -84,7 +81,6 @@ def test_model_inference_crash(client, mock_external_deps):
 
     response = client.post("/predict", files=files)
 
-    # Expect 500
     assert response.status_code == 500
     assert "GPU OOM Error" in response.json()["detail"]  # Expect 500
     assert response.status_code == 500
