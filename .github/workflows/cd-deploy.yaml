@@ -29,8 +29,8 @@ jobs:
       # 1. Build Image
       - name: Build
         run: | 
-          sudo docker build -t ${{ env.IMAGE_NAME }}:latest .
-          sudo docker push ${{ env.IMAGE_NAME }}:latest
+          docker build -t ${{ env.IMAGE_NAME }}:latest .
+          docker push ${{ env.IMAGE_NAME }}:latest
 
       # 2. Inject Secrets & Config
       - name: Update Config
@@ -43,5 +43,5 @@ jobs:
       - name: Deploy
         run: |
           cd ${{ env.PROD_DIR }}
-          sudo docker compose up -d --remove-orphans
-          sudo docker image prune -f  
+          docker compose up -d --remove-orphans
+          docker image prune -f  
