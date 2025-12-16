@@ -24,8 +24,9 @@ jobs:
 
       # 1. Build Image
       - name: Build
-        run: docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest .
-             docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        run: | 
+          docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest .
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
       # 2. Inject Secrets & Config
       - name: Update Config
