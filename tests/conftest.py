@@ -33,9 +33,7 @@ def mock_external_deps():
 
     # PATCH 1: Stop MLflow from hitting the network/disk
     # We patch 'mlflow.tensorflow.load_model' because that is what your main.py calls.
-    with patch(
-        "mlflow.tensorflow.load_model", return_value=mock_model_instance
-    ) as mock_loader:
+    with patch("mlflow.tensorflow.load_model", return_value=mock_model_instance):
         # PATCH 2: Stop mlflow.set_tracking_uri from doing anything
         with patch("mlflow.set_tracking_uri"):
             # PATCH 3: Stop requests.get (for the image URL feature)
