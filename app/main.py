@@ -42,19 +42,29 @@ logger = logging.getLogger(__name__)
 
 models = {}
 
-MODEL_LOCAL_PATH = "models/avocado-model"
+MODEL_LOCAL_PATH = "models/avocado-model.keras"
 MLFLOW_TRACKING_URI = os.environ["MLFLOW_INTERNAL_URI"]
+DEV_MODE = os.environ.get("DEV_MODE", "False").lower() == "true"
 
 
-def load_model_into_memory():
+def load_model_into_memory(force_download=False):
     """
-    Loads the model from the LOCAL disk into the global dictionary.
+    Loads the model from Mlflow into the glob.
     """
     try:
+        tf.keras.config.enable_unsafe_deserialization()
+        if (not force_download and os.path.exists(MODEL_LOCAL_PATH)) and DEV_MODE:
+            logger.info(f"🧠 Loading model from local path: {MODEL_LOCAL_PATH}")
+            models["model"] = tf.keras.models.load_model(MODEL_LOCAL_PATH)
+            logger.info("✅ Model loaded from local disk.")
+            return
+
         logger.info("🧠 Loading model into RAM from...")
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-        tf.keras.config.enable_unsafe_deserialization()
-        models["model"] = mlflow.tensorflow.load_model("models:/avocado-model@champion")
+        model = mlflow.tensorflow.load_model("models:/avocado-model@champion")
+        models["model"] = model
+        os.makedirs(os.path.dirname(MODEL_LOCAL_PATH), exist_ok=True)
+        model.save(MODEL_LOCAL_PATH)
         logger.info("✅ Model loaded into memory.")
     except Exception as e:
         logger.error(f"❌ Error loading model into memory: {e}")
@@ -126,7 +136,7 @@ async def reload_model():
     """Reload the model from MLFlow."""
     try:
         logger.info("Reloading model from MLFlow...")
-        load_model_into_memory()
+        load_model_into_memory(force_download=True)
         return {"message": "Model reloaded"}
     except Exception as e:
         logger.error(f"Error reloading model: {e}")
@@ -135,70 +145,80 @@ async def reload_model():
 
 @app.post("/predict")
 async def predict(
-    image_file: Optional[UploadFile] = File(None),
-    image_url: Optional[str] = Form(None),
-    image_name: Optional[str] = Form(None),
-    storage_condition: StorageCondition = StorageCondition.Tam,
+    image_files: Optional[List[UploadFile]] = File(None),
+    image_urls: Optional[List[str]] = Form(None),
+    storage_conditions: List[StorageCondition] = Form(...),
 ):
     """
     Make a prediction of ripeness of an avocado based on its image and storage condition.
     - image_file: Upload an image file directly. (Option 1)
     - image_url: Provide a URL to an image. (Option 2)
-    - image_name: Provide the name of an image file in the 'images' directory. (Option 2)
     - storage_condition: Specify the storage condition (T10, T20, Tam). Default is 'Tam'.
     """
 
-    # --- 1. Validation and Data Acquisition ---
+    # --- 1. Image Loading ---
+    images = []
+    if image_files:
+        for image in image_files:
+            image = await validate_image_pil(image)
+            images.append(image)
 
-    if image_file and (image_url or image_name):
-        # Error if both methods are provided
+    if image_urls:
+        for url in image_urls:
+            try:
+                response = requests.get(url)
+                response.raise_for_status()
+                image_source = response.content
+                image = Image.open(io.BytesIO(image_source))
+                images.append(image)
+            except Exception as e:
+                logger.error(f"❌ Error loading image from URL: {e}")
+                raise HTTPException(status_code=400, detail=f"Error loading image from URL {url}: {e}")
+
+    if not images:
+        raise HTTPException(status_code=400, detail="No images provided.")
+
+    if not storage_conditions:
+        raise HTTPException(status_code=400, detail="No storage conditions provided.")
+
+    if len(storage_conditions) != len(images):
         raise HTTPException(
             status_code=400,
-            detail="Provide either 'image_file' OR ('image_url' and 'image_name'), not both.",
+            detail="Number of storage conditions and images do not match.",
         )
-
-    # --- 2. Image Loading and Processing ---
-
-    try:
-        if image_file:
-            print(f"Processing uploaded file: {image_file.filename}")
-            image = await validate_image_pil(image_file)
-
-        elif image_url and image_name:
-            print(f"Processing image from URL: {image_url}")
-            response = requests.get(image_url)
-            response.raise_for_status()
-            image_source = response.content
-            image = Image.open(io.BytesIO(image_source))
-
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="Image data missing. Provide 'image_file' or both 'image_url' and 'image_name'.",
-            )
-    except HTTPException as e:
-        # Re-raise HTTP exceptions to send proper client errors
-        raise e
-    except Exception as e:
-        # Better logging for unexpected errors
-        print(f"An unexpected error occurred during image processing: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing image: {e}")
 
     # --- 3. Image Transformation ---
-    image = image.resize((224, 224))
-    img_array = np.array(image)
-    img_array = np.expand_dims(img_array, axis=0)
+    processed_images = []
+    for image in images:
+        try:
+            image = image.resize((224, 224))
+            img_array = np.array(image)
+            processed_images.append(img_array)
+        except Exception as e:
+            logger.error(f"❌ Error processing image: {e}")
+            raise HTTPException(status_code=400, detail=f"Error processing image: {e}")
 
-    # Process the storage condition
-    storage_condition = np.array([mapping[storage_condition]])
+    # --- 4. Storage Conditions ---
+    processed_conditions = []
+    for storage_condition in storage_conditions:
+        storage_condition = np.array(mapping[storage_condition])
+        processed_conditions.append(storage_condition)
 
-    # --- 4. Model Prediction ---
-    x = {"image_input": img_array, "condition_input": storage_condition}
+    # --- 5. Batching ---
+    batch_images = np.array(processed_images)
+    batch_conditions = np.array(processed_conditions)
+    logger.info(f"✅ Batched images: {batch_images.shape}")
+    logger.info(f"✅ Batched conditions: {batch_conditions.shape}")
+
+    # --- 6. Model Prediction ---
+    x = {"image_input": batch_images, "condition_input": batch_conditions}
     try:
-        y = models["model"].predict(x)
-        prediction = y[0][0]
-        return PredictionResponse(
-            prediction=[Prediction(estimated_days=float(prediction))]
-        )
+        predictions = models["model"].predict(x)
+
+        logger.info(f"✅ Prediction: {predictions[:, 0]}")
+        output = []
+        for prediction in predictions[:, 0]:
+            output.append(Prediction(estimated_days=float(prediction)))
+        return PredictionResponse(prediction=output)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
