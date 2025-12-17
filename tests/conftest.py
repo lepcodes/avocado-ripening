@@ -18,8 +18,12 @@ class MockKerasModel:
 
     def predict(self, inputs):
         # inputs is a dict: {'image_input': ..., 'condition_input': ...}
-        # We return a shape (1, 1) to mimic the prediction output [[3.5]]
-        return np.array([[3.5]], dtype=np.float32)
+        # Return shape (batch_size, 1) to mimic the prediction output
+        batch_size = len(inputs["image_input"])
+        return np.full((batch_size, 1), 3.5, dtype=np.float32)
+
+    def save(self, filepath):
+        pass
 
 
 # 3. The Fixture that applies the patches
