@@ -8,6 +8,104 @@
 
 This project is a Deep Learning solution designed to predict the ripening stage of avocados based on image data. It leverages modern MLOps practices, including **Prefect** for orchestration, **MLFlow** for experiment tracking and model registry, and **Docker** for containerization.
 
+## System Architecture
+The following diagram illustrates the end-to-end MLOps workflow, separating the **Application Lifecycle (CI/CD)** from the **Model Lifecycle (CT)**. It highlights how code changes trigger deployments, while model architecture changes trigger retraining on Kaggle.
+```mermaid
+graph LR
+    classDef cicd fill:#ffecb3,stroke:#f39c12,stroke-width:2px,rx:5,ry:5,color:#000;
+    classDef runner fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,rx:5,ry:5,stroke-dasharray: 5 5,color:#000;
+    classDef dsStage fill:#d4e6f1,stroke:#5D6D7E,stroke-width:2px,rx:5,ry:5,color:#000;
+    classDef pipelineStage fill:#d7bde2,stroke:#8e44ad,stroke-width:2px,rx:5,ry:5,color:#000;
+    classDef dataStore fill:#a9dfbf,stroke:#27ae60,stroke-width:2px,rx:5,ry:5,shape:cyl,color:#000;
+    classDef trigger fill:#fad7a0,stroke:#e67e22,stroke-width:2px,rx:15,ry:15,stroke-dasharray: 5 5,color:#000;
+    classDef service fill:#f5cba7,stroke:#d35400,stroke-width:2px,rx:15,ry:15,color:#000;
+    classDef decision fill:#fff,stroke:#8e44ad,stroke-width:2px,rx:5,ry:5,shape:diamond,color:#000;
+    classDef future fill:#eee,stroke:#bbb,stroke-width:2px,rx:5,ry:5,stroke-dasharray: 5 5,color:#000;
+
+    %% --- CI/CD PIPELINE ---
+    subgraph "CI/CD Pipeline (GitHub Actions)"
+        subgraph Padding2 [" "]
+            GitPush("User Pushes Code"):::trigger
+        end
+        style Padding2 fill:none,stroke:none
+        PathFilter{"What changed?"}:::decision
+        
+        %% CI Workflow
+        subgraph "CI Workflow"
+            PyTest("🧪 Run Unit Tests<br/>(Pytest)"):::cicd
+        end
+
+        %% CD Workflow (Self-Hosted)
+        subgraph "CD Workflow (Self-Hosted)"
+            BuildPush("🔨 Build & Push Image<br/>(Docker Hub)"):::cicd
+            UpdateConfig("📝 Update Config<br/>(Inject .env & Compose)"):::cicd
+            ComposeUp("🚀 Deploy<br/>(Compose Up --force-recreate)"):::cicd
+        end
+        
+        ImageRepo[(Docker Hub)]:::dataStore
+    end
+
+    %% --- DATA SCIENCE & CT PIPELINE ---
+    subgraph "DS Development & Automated Pipelines (CI/CT)"
+        
+        subgraph Padding [" "]
+            direction TB
+            DataTrigger("Trigger: New Data / Manual"):::trigger
+        end
+        style Padding fill:none,stroke:none
+
+        subgraph "Processing & Training"
+            Preprocessing(Data Preprocessing):::pipelineStage
+            Training("Model Training <br/>(Kaggle)"):::pipelineStage
+        end
+
+        Registry[(MLflow Model Registry)]:::dataStore
+        Evaluation{"Model Evaluation<br/>(vs Others)"}:::decision
+    end
+
+    %% --- OPERATIONS ---
+    subgraph "ML Operations (Inference)"
+        PredictionService("ML Prediction Service<br/>(FastAPI)"):::service
+        Monitoring("Future: Monitoring<br/>(Prometheus)"):::future
+    end
+
+    %% CONNECTIONS
+    
+    %% 1. Code Flow
+    GitPush --> PathFilter
+    PathFilter -- "App Code" --> PyTest
+    PyTest --> BuildPush
+    
+    %% 2. Deployment Details
+    BuildPush --> ImageRepo
+    BuildPush --> UpdateConfig
+    UpdateConfig --> ComposeUp
+    ComposeUp -.-> PredictionService
+
+    %% 3. The Cross-Over (Model Code -> Training)
+    PathFilter -. "Model Code" .-> Training
+
+    %% 4. Data Science Flow
+    DataTrigger --> Preprocessing
+    Preprocessing --> Training
+    Training --> Registry
+    Registry --> Evaluation
+
+    %% 5. Promotion Flow
+    Evaluation -- "Improved" --> PredictionService
+    Evaluation -- "Not Improved" --> End(("End")):::future
+    
+    %% Feedback
+    PredictionService -.- Monitoring
+    Monitoring -.- DataTrigger
+    
+    %% Layout Hint
+    GitPush ~~~ DataTrigger
+
+    %% STYLING
+    linkStyle 7 stroke:red,stroke-width:3px,stroke-dasharray: 5 5;
+```
+
 ## Tech Stack
 
 * **Python**: Primary programming language.
